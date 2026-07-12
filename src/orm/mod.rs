@@ -9,6 +9,8 @@ use crate::db::{
     BindSource, DBTransaction, Database, DatabaseIter, OrmIter, ResultIter, TransactionIter,
 };
 use crate::errors::DatabaseError;
+pub use crate::expression::agg::AggKind;
+use crate::expression::window::WindowFunctionKind;
 use crate::expression::{self, AliasType, ScalarExpression};
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::join::JoinType;
@@ -99,6 +101,13 @@ pub struct FieldSort<M, T> {
     field: Field<M, T>,
     asc: bool,
     nulls_first: bool,
+}
+
+/// Partitioning and ordering for an ORM window expression.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowSpec {
+    partition_by: Vec<ScalarExpression>,
+    order_by: Vec<SortField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,6 +334,22 @@ pub trait IntoOrmScalarExpression {
     fn into_orm_scalar(self) -> ScalarExpression;
 }
 
+impl WindowSpec {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn partition_by(mut self, expr: impl IntoOrmScalarExpression) -> Self {
+        self.partition_by.push(expr.into_orm_scalar());
+        self
+    }
+
+    pub fn order_by(mut self, field: SortField) -> Self {
+        self.order_by.push(field);
+        self
+    }
+}
+
 impl<E> IntoOrmScalarExpression for E
 where
     E: Into<ScalarExpression>,
@@ -490,7 +515,28 @@ where
         args: Vec<ScalarExpression>,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
         self.binder()
-            .bind_function_call(name.into(), args, false, self.arena())
+            .bind_function_call(name.into(), args, self.arena())
+            .map(|expr| self.wrap(expr))
+    }
+
+    fn aggregate(
+        self,
+        kind: AggKind,
+        args: Vec<ScalarExpression>,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.binder()
+            .bind_aggregate_function(kind, args, false, self.arena())
+            .map(|expr| self.wrap(expr))
+    }
+
+    fn window(
+        self,
+        kind: WindowFunctionKind,
+        args: Vec<ScalarExpression>,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.binder()
+            .bind_window_function(kind, args, spec.partition_by, spec.order_by, self.arena())
             .map(|expr| self.wrap(expr))
     }
 
@@ -1476,18 +1522,110 @@ where
 
     pub fn aggregate<E>(
         &self,
-        name: impl Into<String>,
+        kind: AggKind,
         args: impl IntoIterator<Item = E>,
     ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError>
     where
         E: IntoOrmScalarExpression,
     {
-        self.function(name, args)
+        let args = args
+            .into_iter()
+            .map(IntoOrmScalarExpression::into_orm_scalar)
+            .collect();
+        self.handle().aggregate(kind, args)
+    }
+
+    fn aggregate_window(
+        &self,
+        kind: AggKind,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle().window(
+            WindowFunctionKind::Aggregate(kind),
+            vec![expr.into_orm_scalar()],
+            spec,
+        )
+    }
+
+    pub fn row_number(
+        &self,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle()
+            .window(WindowFunctionKind::RowNumber, Vec::new(), spec)
+    }
+
+    pub fn rank(
+        &self,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle()
+            .window(WindowFunctionKind::Rank, Vec::new(), spec)
+    }
+
+    pub fn dense_rank(
+        &self,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle()
+            .window(WindowFunctionKind::DenseRank, Vec::new(), spec)
+    }
+
+    pub fn count_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window(AggKind::Count, expr, spec)
+    }
+
+    pub fn sum_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window(AggKind::Sum, expr, spec)
+    }
+
+    pub fn avg_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window(AggKind::Avg, expr, spec)
+    }
+
+    pub fn min_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window(AggKind::Min, expr, spec)
+    }
+
+    pub fn max_over(
+        &self,
+        expr: impl IntoOrmScalarExpression,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.aggregate_window(AggKind::Max, expr, spec)
+    }
+
+    pub fn count_all_over(
+        &self,
+        spec: WindowSpec,
+    ) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
+        self.handle().window(
+            WindowFunctionKind::Aggregate(AggKind::Count),
+            vec![Binder::<'bind, 'parent, T, A>::wildcard_expr()],
+            spec,
+        )
     }
 
     pub fn count_all(&self) -> Result<CtxExpression<'bind, 'parent, 'arena, T, A>, DatabaseError> {
-        self.function(
-            "count",
+        self.aggregate(
+            AggKind::Count,
             vec![Binder::<'bind, 'parent, T, A>::wildcard_expr()],
         )
     }
@@ -3709,12 +3847,12 @@ mod tests {
                 .project_tuple(|e| {
                     Ok(vec![
                         e.column(OrmUnitOrder::user_id())?,
-                        e.aggregate("sum", [e.column(OrmUnitOrder::amount())?])?,
+                        e.aggregate(AggKind::Sum, [e.column(OrmUnitOrder::amount())?])?,
                     ])
                 })?
                 .group_by(|e| e.column(OrmUnitOrder::user_id()))?
                 .having(|e| {
-                    e.aggregate("sum", [e.column(OrmUnitOrder::amount())?])?
+                    e.aggregate(AggKind::Sum, [e.column(OrmUnitOrder::amount())?])?
                         .gte(200)
                 })?
                 .order_by_expr(|e| Ok(e.column(OrmUnitOrder::user_id())?.asc()))?

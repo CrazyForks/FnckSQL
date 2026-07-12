@@ -20,7 +20,7 @@ use crate::types::value::DataValue;
 use std::borrow::Cow;
 
 pub struct MinMaxAccumulator {
-    inner: Option<DataValue>,
+    result: DataValue,
     op: BinaryOperator,
 }
 
@@ -32,16 +32,19 @@ impl MinMaxAccumulator {
             BinaryOperator::Gt
         };
 
-        Self { inner: None, op }
+        Self {
+            result: DataValue::Null,
+            op,
+        }
     }
 }
 
 impl Accumulator for MinMaxAccumulator {
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError> {
         if !value.is_null() {
-            if let Some(inner_value) = &self.inner {
+            if !self.result.is_null() {
                 let evaluator = binary_create(Cow::Owned(value.logical_type()), self.op)?;
-                if let DataValue::Boolean(result) = evaluator.binary_eval(inner_value, value)? {
+                if let DataValue::Boolean(result) = evaluator.binary_eval(&self.result, value)? {
                     result
                 } else {
                     return Err(DatabaseError::InvalidType);
@@ -49,13 +52,40 @@ impl Accumulator for MinMaxAccumulator {
             } else {
                 true
             }
-            .then(|| self.inner = Some(value.clone()));
+            .then(|| self.result = value.clone());
         }
 
         Ok(())
     }
 
-    fn evaluate(self: Box<Self>) -> Result<DataValue, DatabaseError> {
-        Ok(self.inner.unwrap_or(DataValue::Null))
+    fn result(&self) -> &DataValue {
+        &self.result
+    }
+
+    fn result_owned(self: Box<Self>) -> DataValue {
+        self.result
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn min_max_results() -> Result<(), DatabaseError> {
+        for (is_max, expected) in [(false, 1), (true, 3)] {
+            let mut accumulator = MinMaxAccumulator::new(is_max);
+            for value in [DataValue::Null, 3.into(), 1.into(), 2.into()] {
+                accumulator.update_value(&value)?;
+            }
+            assert_eq!(accumulator.result(), &DataValue::Int32(expected));
+            assert_eq!(
+                Box::new(accumulator).result_owned(),
+                DataValue::Int32(expected)
+            );
+        }
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP

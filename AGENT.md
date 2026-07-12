@@ -81,6 +81,8 @@ PRs that modify logic but leave obvious test gaps untouched may be rejected.
 
 ### 3.1 Prefer Simple Code
 
+- Implement functionality with the smallest reasonable change and the simplest correct design.
+- Do not over-engineer or introduce abstractions for hypothetical future requirements.
 - Prefer straightforward control flow
 - Avoid unnecessary abstractions
 - Avoid premature generalization
@@ -149,6 +151,8 @@ KiteSQL aims to stay easy to build, easy to audit, and easy to understand.
 
 A valid PR should:
 
+- Follow the repository pull request template
+- Describe test coverage and verified behavior instead of listing commands that were run
 - Compile cleanly
 - Pass all tests via make
 - Include new tests if behavior changes
