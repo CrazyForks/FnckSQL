@@ -135,7 +135,6 @@ mod tests {
             }),
             Operator::Sort(SortOperator {
                 sort_fields: vec![SortField::from(expr())],
-                limit: None,
             }),
             Operator::TopK(TopKOperator {
                 sort_fields: vec![SortField::from(expr())],
@@ -205,6 +204,7 @@ mod tests {
         let mut join = LogicalPlan::new(
             Operator::Join(JoinOperator {
                 join_type: JoinType::Inner,
+                force_nested_loop: false,
                 on: JoinCondition::On {
                     on: vec![(expr(), expr())],
                     filter: Some(expr()),

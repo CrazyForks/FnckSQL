@@ -55,6 +55,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             agg_calls,
             groupby_exprs,
             false,
+            self.force_spill,
         ))
     }
 

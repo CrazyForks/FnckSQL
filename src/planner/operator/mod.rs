@@ -172,6 +172,7 @@ pub enum PlanImpl {
     Dummy,
     SimpleAggregate,
     HashAggregate,
+    StreamAggregate,
     StreamDistinct,
     ScalarApply,
     MarkApply,
@@ -527,6 +528,7 @@ impl fmt::Display for PlanImpl {
             PlanImpl::Dummy => write!(f, "Dummy"),
             PlanImpl::SimpleAggregate => write!(f, "SimpleAggregate"),
             PlanImpl::HashAggregate => write!(f, "HashAggregate"),
+            PlanImpl::StreamAggregate => write!(f, "StreamAggregate"),
             PlanImpl::StreamDistinct => write!(f, "StreamDistinct"),
             PlanImpl::ScalarApply => write!(f, "ScalarApply"),
             PlanImpl::MarkApply => write!(f, "MarkApply"),
@@ -605,7 +607,7 @@ mod tests {
             covered_deserializers: None,
             cover_mapping: None,
             sort_elimination_hint: None,
-            stream_distinct_hint: None,
+            stream_aggregate_hint: None,
         }
     }
 
@@ -653,6 +655,7 @@ mod tests {
             (PlanImpl::Dummy, "Dummy"),
             (PlanImpl::SimpleAggregate, "SimpleAggregate"),
             (PlanImpl::HashAggregate, "HashAggregate"),
+            (PlanImpl::StreamAggregate, "StreamAggregate"),
             (PlanImpl::StreamDistinct, "StreamDistinct"),
             (PlanImpl::ScalarApply, "ScalarApply"),
             (PlanImpl::MarkApply, "MarkApply"),
@@ -736,6 +739,7 @@ mod tests {
             agg_calls: vec![column_expr(a, 0)],
             groupby_exprs: vec![column_expr(b, 1)],
             is_distinct: false,
+            force_spill: false,
         });
         assert_eq!(referenced_columns(&aggregate, &mut arena)?, vec![a, b]);
 
@@ -755,6 +759,7 @@ mod tests {
 
         let join = Operator::Join(JoinOperator {
             join_type: join::JoinType::Inner,
+            force_nested_loop: false,
             on: JoinCondition::On {
                 on: vec![(column_expr(a, 0), column_expr(b, 1))],
                 filter: Some(column_expr(c, 2)),
@@ -838,7 +843,6 @@ mod tests {
 
         let sort = Operator::Sort(SortOperator {
             sort_fields: vec![SortField::from(column_expr(a, 0))],
-            limit: None,
         });
         assert_eq!(referenced_columns(&sort, &mut arena)?, vec![a]);
 
@@ -1093,11 +1097,10 @@ mod tests {
 
         let sort = Operator::Sort(SortOperator {
             sort_fields: vec![descending_nulls_first.clone(), ascending_nulls_last.clone()],
-            limit: Some(10),
         });
         assert_eq!(
             sort.to_string(),
-            "Sort By 9 Desc Nulls First, 1 Asc Nulls Last, Limit 10"
+            "Sort By 9 Desc Nulls First, 1 Asc Nulls Last"
         );
 
         let child = LogicalPlan::new(Operator::ShowTable, Childrens::None);

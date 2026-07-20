@@ -391,7 +391,7 @@ pub(crate) mod tests {
             covered_deserializers: None,
             cover_mapping: None,
             sort_elimination_hint: None,
-            stream_distinct_hint: None,
+            stream_aggregate_hint: None,
         }
     }
 
@@ -417,6 +417,7 @@ pub(crate) mod tests {
                 groupby_exprs: vec![1_i32.into()],
                 agg_calls: vec![2_i32.into()],
                 is_distinct: false,
+                force_spill: false,
             }),
             Operator::ScalarApply(ScalarApplyOperator),
             Operator::MarkApply(mark_apply),
@@ -431,6 +432,7 @@ pub(crate) mod tests {
                     filter: Some(8_i32.into()),
                 },
                 join_type: JoinType::Inner,
+                force_nested_loop: false,
             }),
             Operator::Project(ProjectOperator {
                 exprs: vec![9_i32.into()],
@@ -446,7 +448,6 @@ pub(crate) mod tests {
             Operator::FunctionScan(FunctionScanOperator { table_function }),
             Operator::Sort(SortOperator {
                 sort_fields: vec![SortField::from(ScalarExpression::from(13_i32))],
-                limit: None,
             }),
             Operator::Limit(LimitOperator {
                 offset: None,

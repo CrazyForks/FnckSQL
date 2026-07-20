@@ -35,6 +35,7 @@ impl<T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'_, '_, T, A>
             vec![],
             select_list,
             true,
+            self.force_spill,
         ))
     }
 

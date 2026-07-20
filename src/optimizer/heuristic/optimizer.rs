@@ -25,7 +25,6 @@ use crate::optimizer::rule::normalization::{
     apply_annotated_post_rules, apply_scan_order_hint, constant_calculation_current,
     evaluator_bind_current, NormalizationRuleImpl, OrderHintKind, ScanOrderHint, WholeTreePassKind,
 };
-use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
@@ -77,14 +76,14 @@ impl<'a> HepOptimizer<'a> {
             if self.implementation_index.is_empty().not() {
                 let apply_no_sort_hints =
                     |_scan_op: &mut TableScanOperator, _arena: &PlanArena| Ok(());
-                let apply_no_stream_distinct_hints =
+                let apply_no_stream_aggregate_hints =
                     |_scan_op: &mut TableScanOperator, _arena: &PlanArena| Ok(());
                 Self::annotate_hints_and_physical_options(
                     &mut self.plan,
                     loader,
                     self.implementation_index,
                     &apply_no_sort_hints,
-                    &apply_no_stream_distinct_hints,
+                    &apply_no_stream_aggregate_hints,
                     arena,
                 )?;
             }
@@ -247,12 +246,12 @@ impl<'a> HepOptimizer<'a> {
         loader: &StatisticMetaLoader<'_>,
         implementation_index: &ImplementationRuleIndex,
         inherited_sort_hints: &'plan ScanHintApplier<'plan>,
-        inherited_stream_distinct_hints: &'plan ScanHintApplier<'plan>,
+        inherited_stream_aggregate_hints: &'plan ScanHintApplier<'plan>,
         arena: &mut PlanArena,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = &mut plan.operator {
             inherited_sort_hints(scan_op, arena)?;
-            inherited_stream_distinct_hints(scan_op, arena)?;
+            inherited_stream_aggregate_hints(scan_op, arena)?;
         }
 
         {
@@ -281,16 +280,16 @@ impl<'a> HepOptimizer<'a> {
                 ..
             } = plan;
             Self::with_child_sort_hints(operator, inherited_sort_hints, |child_sort_hints| {
-                Self::with_child_stream_distinct_hints(
+                Self::with_child_stream_aggregate_hints(
                     operator,
-                    inherited_stream_distinct_hints,
-                    |child_stream_distinct_hints| match &mut **childrens {
+                    inherited_stream_aggregate_hints,
+                    |child_stream_aggregate_hints| match &mut **childrens {
                         Childrens::Only(child) => Self::annotate_hints_and_physical_options(
                             child,
                             loader,
                             implementation_index,
                             child_sort_hints,
-                            child_stream_distinct_hints,
+                            child_stream_aggregate_hints,
                             arena,
                         ),
                         Childrens::Twins { left, right } => {
@@ -299,7 +298,7 @@ impl<'a> HepOptimizer<'a> {
                                 loader,
                                 implementation_index,
                                 child_sort_hints,
-                                child_stream_distinct_hints,
+                                child_stream_aggregate_hints,
                                 arena,
                             )?;
                             Self::annotate_hints_and_physical_options(
@@ -307,7 +306,7 @@ impl<'a> HepOptimizer<'a> {
                                 loader,
                                 implementation_index,
                                 child_sort_hints,
-                                child_stream_distinct_hints,
+                                child_stream_aggregate_hints,
                                 arena,
                             )
                         }
@@ -357,9 +356,9 @@ impl<'a> HepOptimizer<'a> {
         }
     }
 
-    fn with_child_stream_distinct_hints<'plan, R>(
+    fn with_child_stream_aggregate_hints<'plan, R>(
         operator: &'plan Operator,
-        inherited_stream_distinct_hints: &'plan ScanHintApplier<'plan>,
+        inherited_stream_aggregate_hints: &'plan ScanHintApplier<'plan>,
         f: impl for<'b> FnOnce(&'b ScanHintApplier<'plan>) -> R,
     ) -> R {
         let propagate_hints = matches!(
@@ -372,25 +371,23 @@ impl<'a> HepOptimizer<'a> {
         );
 
         match operator {
-            Operator::Aggregate(op)
-                if op.is_distinct && op.agg_calls.is_empty() && !op.groupby_exprs.is_empty() =>
-            {
-                let child_stream_distinct_hints =
+            Operator::Aggregate(op) if !op.groupby_exprs.is_empty() => {
+                let child_stream_aggregate_hints =
                     |scan_op: &mut TableScanOperator, arena: &PlanArena| {
                         apply_scan_order_hint(
                             scan_op,
-                            ScanOrderHint::distinct_groupby(&op.groupby_exprs),
-                            OrderHintKind::StreamDistinct,
+                            ScanOrderHint::groupby(&op.groupby_exprs),
+                            OrderHintKind::StreamAggregate,
                             arena,
                         )
                     };
-                f(&child_stream_distinct_hints)
+                f(&child_stream_aggregate_hints)
             }
-            _ if propagate_hints => f(inherited_stream_distinct_hints),
+            _ if propagate_hints => f(inherited_stream_aggregate_hints),
             _ => {
-                let no_stream_distinct_hints =
+                let no_stream_aggregate_hints =
                     |_scan_op: &mut TableScanOperator, _arena: &PlanArena| Ok(());
-                f(&no_stream_distinct_hints)
+                f(&no_stream_aggregate_hints)
             }
         }
     }
@@ -504,11 +501,7 @@ impl ImplementationRuleIndex {
                 Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow))
             }
             Operator::Join(join_op) if self.contains(ImplementationRuleImpl::HashJoin) => {
-                let plan = match &join_op.on {
-                    JoinCondition::On { on, .. } if !on.is_empty() => PlanImpl::HashJoin,
-                    _ => PlanImpl::NestLoopJoin,
-                };
-                Some(PhysicalOption::new(plan, SortOption::None))
+                Some(PhysicalOption::new(join_op.plan_impl(), SortOption::None))
             }
             Operator::Limit(_) if self.contains(ImplementationRuleImpl::Limit) => {
                 Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow))

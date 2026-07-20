@@ -1364,6 +1364,7 @@ where
                     self.binder.bind_table_ref_sql(from, self.arena)?,
                     JoinCondition::None,
                     JoinType::Cross,
+                    self.binder.force_nested_loop,
                 )
             }
             plan
@@ -2594,6 +2595,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let Select {
+            optimizer_hint,
             projection,
             from,
             selection,
@@ -2615,19 +2617,40 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<
                 "QUALIFY is not supported".to_string(),
             ));
         }
-        Ok(self
-            .build_plan(arena)
-            .from_sql(from)?
-            .select_list_from_sql(projection)?
-            .where_sql(selection.as_ref())?
-            .aggregate_sql(group_by, having.as_ref(), orderby)?
-            .having()?
-            .window()?
-            .distinct_sql(distinct.as_ref())?
-            .order_by()?
-            .project()?
-            .select_into_sql(into.as_ref())?
-            .finish())
+        let has_hint = |expected: &str| {
+            optimizer_hint.as_ref().is_some_and(|hint| {
+                hint.text
+                    .split(|char: char| char.is_ascii_whitespace() || char == ',')
+                    .any(|hint| hint.eq_ignore_ascii_case(expected))
+            })
+        };
+        let force_spill = has_hint("FORCE_AGG_SPILL");
+        let force_nested_loop = has_hint("FORCE_NEST_LOOP_JOIN");
+        if force_spill && !cfg!(feature = "spill") {
+            return Err(DatabaseError::UnsupportedStmt(
+                "FORCE_AGG_SPILL requires the `spill` feature".to_string(),
+            ));
+        }
+        let previous_options = (self.force_spill, self.force_nested_loop);
+        self.force_spill = force_spill;
+        self.force_nested_loop = force_nested_loop;
+        let result = (|| {
+            Ok(self
+                .build_plan(arena)
+                .from_sql(from)?
+                .select_list_from_sql(projection)?
+                .where_sql(selection.as_ref())?
+                .aggregate_sql(group_by, having.as_ref(), orderby)?
+                .having()?
+                .window()?
+                .distinct_sql(distinct.as_ref())?
+                .order_by()?
+                .project()?
+                .select_into_sql(into.as_ref())?
+                .finish())
+        })();
+        (self.force_spill, self.force_nested_loop) = previous_options;
+        result
     }
 
     /// FIXME: temp values need to register BindContext.bind_table
@@ -3134,6 +3157,54 @@ mod tests {
             DatabaseError::InvalidColumn { .. }
         ));
 
+        Ok(())
+    }
+
+    #[test]
+    fn force_nest_loop_join_marks_join_operator() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+        let plan =
+            tables.plan("select /*+ FORCE_NEST_LOOP_JOIN */ c1, c3 from t1 join t2 on c1 = c3")?;
+        let join = plan
+            .childrens
+            .iter()
+            .find_map(|plan| match &plan.operator {
+                Operator::Join(operator) => Some(operator),
+                _ => None,
+            })
+            .expect("query should contain a join");
+
+        assert!(join.force_nested_loop);
+        Ok(())
+    }
+
+    #[cfg(feature = "spill")]
+    #[test]
+    fn optimizer_hints_can_be_combined() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+        let plan = tables.plan(
+            "select /*+ FORCE_AGG_SPILL, FORCE_NEST_LOOP_JOIN */ c1, count(c3) \
+             from t1 join t2 on c1 = c3 group by c1",
+        )?;
+        let aggregate_plan = plan
+            .childrens
+            .iter()
+            .find(|plan| matches!(plan.operator, Operator::Aggregate(_)))
+            .expect("query should contain an aggregate");
+        let Operator::Aggregate(aggregate) = &aggregate_plan.operator else {
+            unreachable!()
+        };
+        let join = aggregate_plan
+            .childrens
+            .iter()
+            .find_map(|plan| match &plan.operator {
+                Operator::Join(operator) => Some(operator),
+                _ => None,
+            })
+            .expect("aggregate input should contain a join");
+
+        assert!(aggregate.force_spill);
+        assert!(join.force_nested_loop);
         Ok(())
     }
 

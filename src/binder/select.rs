@@ -884,6 +884,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
     }
 
     fn build_join_from_split_scope_predicates(
+        &self,
         mut children: LogicalPlan,
         mut plan: LogicalPlan,
         join_ty: JoinType,
@@ -931,6 +932,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
             plan,
             join_condition,
             join_ty,
+            self.force_nested_loop,
         ))
     }
 
@@ -1403,7 +1405,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         )?;
         Self::localize_join_condition_from_join_scope(&mut on, left_len)?;
 
-        Ok(LJoinOperator::build(left, right, on, join_type))
+        Ok(LJoinOperator::build(
+            left,
+            right,
+            on,
+            join_type,
+            self.force_nested_loop,
+        ))
     }
 
     pub(crate) fn bind_where_expr(
@@ -1500,7 +1508,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
                                     .to_string(),
                             ));
                         }
-                        children = Self::build_join_from_split_scope_predicates(
+                        children = self.build_join_from_split_scope_predicates(
                             children,
                             plan,
                             JoinType::Inner,
@@ -1909,10 +1917,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(&'static str, DataValue)]>> Binder<'
         self.context.step(QueryBindStep::Sort);
 
         Ok(LogicalPlan::new(
-            Operator::Sort(SortOperator {
-                sort_fields,
-                limit: None,
-            }),
+            Operator::Sort(SortOperator { sort_fields }),
             Childrens::Only(Box::new(children)),
         ))
     }

@@ -1845,6 +1845,23 @@ where
         }
     }
 
+    /// Forces subsequent grouped aggregate or distinct operations to use spill-backed execution.
+    pub fn force_spill(self) -> Result<Self, DatabaseError> {
+        if !cfg!(feature = "spill") {
+            return Err(DatabaseError::UnsupportedStmt(
+                "force_spill requires the `spill` feature".to_string(),
+            ));
+        }
+        self.binder.force_spill = true;
+        Ok(self)
+    }
+
+    /// Forces subsequent joins in this query to use nested-loop execution.
+    pub fn force_nested_loop(self) -> Self {
+        self.binder.force_nested_loop = true;
+        self
+    }
+
     pub fn filter<E>(
         mut self,
         build: impl for<'scope> FnOnce(
@@ -3993,6 +4010,84 @@ mod tests {
                 "TableScan orm_unit_orders -> [#4] [SeqScan => (Sort Option: None)]"
             ),
             "{full_using_plan}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn query_builder_force_nested_loop_join() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database()?;
+
+        let plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitUser>()?
+                .force_nested_loop()
+                .inner_join::<OrmUnitOrder, _>(|e| {
+                    e.column(OrmUnitUser::id())?
+                        .eq(e.column(OrmUnitOrder::user_id())?)
+                })?
+                .project_scalar(OrmUnitUser::id())?
+                .finish()
+        })?;
+        assert_eq!(
+            plan,
+            concat!(
+                "Projection [#1] [Project => (Sort Option: Follow)] ",
+                "Inner Join On #1 = #5 [NestLoopJoin => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [#1] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_orders -> [#5] [SeqScan => (Sort Option: None)]"
+            ),
+            "{plan}"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(feature = "spill")]
+    #[test]
+    fn query_builder_force_spill_aggregate_and_distinct() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database()?;
+
+        let plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitOrder>()?
+                .force_spill()?
+                .project_tuple(|e| {
+                    Ok(vec![
+                        e.column(OrmUnitOrder::user_id())?,
+                        e.aggregate(AggKind::Sum, [e.column(OrmUnitOrder::amount())?])?,
+                    ])
+                })?
+                .group_by(|e| e.column(OrmUnitOrder::user_id()))?
+                .order_by_expr(|e| Ok(e.column(OrmUnitOrder::user_id())?.asc()))?
+                .finish()
+        })?;
+        assert_eq!(
+            plan,
+            concat!(
+                "Projection [#5, #7] [Project => (Sort Option: Follow)] ",
+                "Aggregate [Sum(#6)] -> Group By [#5] [StreamAggregate => (Sort Option: Follow)] ",
+                "Sort By #5 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#5 Asc Nulls Last) ignore_prefix_len: 0)] ",
+                "TableScan orm_unit_orders -> [#5, #6] [SeqScan => (Sort Option: None)]"
+            ),
+            "{plan}"
+        );
+
+        let distinct_plan = database.explain(|ctx| {
+            ctx.from::<OrmUnitOrder>()?
+                .force_spill()?
+                .project_scalar(OrmUnitOrder::user_id())?
+                .distinct()?
+                .finish()
+        })?;
+        assert_eq!(
+            distinct_plan,
+            concat!(
+                "Projection [#5] [Project => (Sort Option: Follow)] ",
+                "Aggregate [] -> Group By [#5] [StreamDistinct => (Sort Option: Follow)] ",
+                "Sort By #5 Asc Nulls Last [Sort => (Sort Option: OrderBy: (#5 Asc Nulls Last) ignore_prefix_len: 0)] ",
+                "TableScan orm_unit_orders -> [#5] [SeqScan => (Sort Option: None)]"
+            ),
+            "{distinct_plan}"
         );
 
         Ok(())
